@@ -18,8 +18,8 @@ import org.apache.commons.io.{FileUtils, FilenameUtils}
 object Logger {
   def currentTime: String = { 
     val date = new Date()
-      val time = date.getTime()
-      "%s %s".format(date, time)
+    val time = date.getTime()
+    "%s %s".format(date, time)
   }
   def info(msg: String) = println("[%s]: %s".format(currentTime, msg))
   def apply(msg: String) = info(msg)
@@ -338,7 +338,7 @@ object BICseqXO {
     Logger("%d bins detected from %s".format(bins.size, binFile))
 
     // BIC-seq
-    val totalReadCount = bins.map(_.readCountTotal).sum
+    val totalReadCount = bins.par.map(_.readCountTotal).sum
     var originalBIC = calculateBIC(bins, lambda, totalReadCount)
     var noConsecutiveBins = 2
 
