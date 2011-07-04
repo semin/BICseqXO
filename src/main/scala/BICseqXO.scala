@@ -1,6 +1,6 @@
 package org.bioholic
 
-import scala.Math._
+import scala.math._
 import scala.io.Source._
 import scala.concurrent.stm._
 import scala.collection.mutable._
@@ -66,17 +66,22 @@ case class Bin( refName: String, posStart: Int, posEnd: Int,
                 val gcContent: Int = 0) {
   def length = posEnd - posStart + 1
   def posRange = (posStart to posEnd)
-  def contains(w: Window) = posRange.contains(w.posStart) && posRange.contains(w.posEnd)
-  def readCountTotal = readCountTest + readCountControl
-  def readCountRatio = readCountTest / readCountTotal.toDouble
-  def log2Ratio = log(readCountRatio) / log(2)
-  def logL = {
+  def readCountBoth = readCountTest + readCountControl
+  def readCountRatio = readCountTest / readCountControl.toDouble
+  def readCountRatioTest = readCountTest / readCountBoth.toDouble
+  def log2Ratio = 
+    if (readCountRatio != 0) {
+      log(readCountRatio) / log(2)
+    } else {
+      log(readCountRatio + 0.0000000001) / log(2)
+    }
+  def logL =
     if (readCountTest != 0 && readCountControl != 0) {
-      readCountTest * log(readCountRatio) + readCountControl * log(1.0 - readCountRatio)
+      readCountTest * log(readCountRatioTest) + readCountControl * log(1.0 - readCountRatioTest)
     } else {
       0
     }
-  }
+  def contains(w: Window) = posRange.contains(w.posStart) && posRange.contains(w.posEnd)
   def + (operand: Bin): Bin = {
     val newGCContent = (gcContent * length + operand.gcContent * operand.length) / (length + operand.length)
     Bin(refName, posStart, operand.posEnd,
@@ -97,17 +102,17 @@ object BICseqXO {
     println("See 'java -jar BICseqXO-<version>.jar <commnad> -h/--help' for more information on a specific command.")
   }
 
-  def parseRefNames(arg: String): ArrayBuffer[String] = {
+  def parseRefNames(arg: String): Array[String] = {
     val refNames = arg.split(',')
     var newRefnames = new ArrayBuffer[String]()
     val RefNameRegex = """(\w*)(\d+)-(\d+)""".r
     for (refName <- refNames) {
       refName match {
-        case RefNameRegex(prefix, start, end) => { (start.toInt to end.toInt).foreach(r => newRefnames += (prefix + r.toString)) }
-        case _ => { newRefnames += refName }
+        case RefNameRegex(prefix, start, end) => (start.toInt to end.toInt).foreach(r => newRefnames += (prefix + r.toString))
+        case _ => newRefnames += refName
       }
     }
-    return newRefnames
+    newRefnames.toArray
   }
 
   def createMapFile(bamFile: String, refName: String, mapDir: String, minMappingQuality: Int, maxMismatch: Int): Unit = {
@@ -167,15 +172,13 @@ object BICseqXO {
 
     for (line <- fromFile(bedFile).getLines()) {
       line match {
-        case BinRegex(chrName, posStart, posEnd, gcContent) => {
+        case BinRegex(chrName, posStart, posEnd, gcContent) =>
           if (chrName == refName) {
-            if (gcContent.size > 0) {
+            if (gcContent.size > 0)
               bins += Bin(chrName, posStart.toInt + 1, posEnd.toInt, gcContent=gcContent.toInt)
-            } else {
+            else 
               bins += Bin(chrName, posStart.toInt + 1, posEnd.toInt)
-            }
           }
-        }
         case _ => // do nothing
       }
     }
@@ -195,9 +198,6 @@ object BICseqXO {
           tIdx += 1
         }
       }
-    }
-
-    for (b <- bins) {
       if (wins1bpControl.isDefinedAt(cIdx) && (wins1bpControl(cIdx).posStart <= b.posEnd)) {
         while (wins1bpControl.isDefinedAt(cIdx) && !b.contains(wins1bpControl(cIdx)) && (wins1bpControl(cIdx).posStart <= b.posEnd)) {
           cIdx += 1
@@ -224,7 +224,7 @@ object BICseqXO {
         windows += Window(pos, pos)
       }
     }
-    return windows.toArray
+    windows.toArray
   }
 
   def createBinFiles(args: Array[String]) = {
@@ -268,8 +268,8 @@ object BICseqXO {
               totalRefReadCountTest += bin.readCountTest
               totalRefReadCountControl += bin.readCountControl
               atomic { implicit txn => refNameToBins(ref) += bin }
-              if (bin.readCountTotal != 0) {
-                binFileWriter.write("%d\t%d\t%.6f\t%d\t%d\n".format(bin.readCountTest, bin.readCountTotal, bin.readCountRatio, bin.posStart, bin.posEnd))
+              if (bin.readCountBoth != 0) {
+                binFileWriter.write("%d\t%d\t%.6f\t%d\t%d\n".format(bin.readCountTest, bin.readCountBoth, bin.readCountRatioTest, bin.posStart, bin.posEnd))
               }
             }
             atomic { implicit txn =>
@@ -281,12 +281,12 @@ object BICseqXO {
           } else {
             // exit program for the moment.
             System.err.println("Cannot find %s".format(config.bedFile))
-            System.exit(0)
+            System.exit(1)
           }
         } else {
           // do regular BIC-seq without bins
           System.err.println("You must provide a BED file for the current version of BICseqXO.")
-          System.exit(0)
+          System.exit(1)
         }
       }
 
@@ -299,46 +299,46 @@ object BICseqXO {
         val binFileWriter = new FileWriter(binFile)
         for (bin <- refNameToBins(ref)) {
           val readCountTestNorm = (scale * bin.readCountTest).ceil.toInt
-          if (bin.readCountTotal != 0) {
-            binFileWriter.write("%d\t%d\t%.6f\t%d\t%d\n".format(readCountTestNorm, bin.readCountTotal, bin.readCountRatio, bin.posStart, bin.posEnd))
+          if (bin.readCountBoth != 0) {
+            binFileWriter.write("%d\t%d\t%.6f\t%d\t%d\n".format(readCountTestNorm, bin.readCountBoth, bin.readCountRatioTest, bin.posStart, bin.posEnd))
           }
         }
         binFileWriter.close
         Logger("Read counts of %s normalized by scale factor, %.6f".format(ref, scale))
       }
-      System.exit(1)
     } else {
       // When arguments are bad, usage message will have been displayed
     }
   }
     
-  def calculateBIC(bins: ArrayBuffer[Bin], lambda: Int, totalReadCount: Int): Double = {
-    -2 * bins.par.map(_.logL).sum + (bins.size + 1) * lambda * log(totalReadCount)
-  }
-
-  def diffBIC(bins1: ArrayBuffer[Bin], bins2:ArrayBuffer[Bin], lambda: Int, totalReadCount: Int): Double = {
-    calculateBIC(bins1, lambda, totalReadCount) - calculateBIC(bins2, lambda, totalReadCount)
-  }
-
   def createSegFile(binFile: String, segFile: String, lambda: Int, id: String): Unit = {
+
+    def calculateBIC(bins: Array[Bin], lambda: Int, totalReadCount: Int): Double = {
+      (bins.size + 1) * lambda * log(totalReadCount) - 2 * bins.map(_.logL).sum
+    }
+
+    def diffBIC(bins1: Array[Bin], bins2: Array[Bin], lambda: Int, totalReadCount: Int): Double = {
+      calculateBIC(bins1, lambda, totalReadCount) - calculateBIC(bins2, lambda, totalReadCount)
+    }
+
+    var tmpBins = new ArrayBuffer[Bin]()
     val refName = FilenameUtils.getBaseName(binFile).split('.').head
     val BinRegex = """^(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(\d+).*$""".r
-    var bins = new ArrayBuffer[Bin]()
 
     for (line <- fromFile(binFile).getLines) {
       line match {
-        case BinRegex(readCountTest, readCountTotal, readCountRatio, posStart, posEnd) => {
-          val readCountControl = readCountTotal.toInt - readCountTest.toInt
-          bins += Bin(refName, posStart.toInt, posEnd.toInt, readCountTest.toInt, readCountControl)
-        }
+        case BinRegex(readCountTest, readCountBoth, readCountRatioTest, posStart, posEnd) =>
+          val readCountControl = readCountBoth.toInt - readCountTest.toInt
+          tmpBins += Bin(refName, posStart.toInt, posEnd.toInt, readCountTest.toInt, readCountControl)
         case _ => // do nothing
       }
     }
 
-    Logger("%d bins detected from %s".format(bins.size, binFile))
+    Logger("%d bins detected from %s".format(tmpBins.size, binFile))
 
     // BIC-seq
-    val totalReadCount = bins.par.map(_.readCountTotal).sum
+    var bins = tmpBins.toArray
+    val totalReadCount = bins.map(_.readCountBoth).sum
     var originalBIC = calculateBIC(bins, lambda, totalReadCount)
     var noConsecutiveBins = 2
 
@@ -346,54 +346,52 @@ object BICseqXO {
       var anyBinMerged = false
       var noMergedBinInLevel = 0
       do {
-        var minDiffBIC = 0.0
-        var minDiffIdx = 0
-        var minDiffBin = bins.head // could be any Bin object
+        var minDiffBIC = Ref(0.0)
+        var minDiffIdx = Ref(0)
+        var minDiffBin = Ref(bins.head) // could be any Bin object
+        val untilIdx = bins.size - noConsecutiveBins
 
-        // while loop instead of loop due to performance issue
-        var untilIdx = bins.size - noConsecutiveBins
-        var fromIdx = 0
-
-        while (fromIdx <= untilIdx) {
+        (0 to untilIdx).par.foreach { fromIdx =>
           val binRange = fromIdx to (fromIdx + noConsecutiveBins - 1)
           val mergedBin = binRange.map(bins(_)).reduceLeft(_ + _)
           val binRangeLogL = bins.slice(binRange.head, binRange.last + 1).map(_.logL).sum
           val bicDiff = 2 * (binRangeLogL - mergedBin.logL) - (noConsecutiveBins - 1) * lambda * log(totalReadCount)
 
-          if (bicDiff < minDiffBIC) {
-            minDiffBIC = bicDiff
-            minDiffIdx = fromIdx
-            minDiffBin = mergedBin
+          atomic { implicit txn =>
+            if (bicDiff < minDiffBIC()) {
+              minDiffBIC() = bicDiff
+              minDiffIdx() = fromIdx
+              minDiffBin() = mergedBin
+            }
           }
-          fromIdx += 1
         }
 
-        if (minDiffBIC < 0) {
-          originalBIC += minDiffBIC
-          anyBinMerged = true
-          noMergedBinInLevel += 1
-          val binsBeforeBreak = bins.splitAt(minDiffIdx)._1
-          val binsAfterBreak = bins.splitAt(minDiffIdx + noConsecutiveBins)._2
-          bins = binsBeforeBreak ++ ArrayBuffer(minDiffBin) ++ binsAfterBreak
-        } else {
-          anyBinMerged = false
+        atomic { implicit txn =>
+          if (minDiffBIC() < 0) {
+            originalBIC += minDiffBIC()
+            anyBinMerged = true
+            noMergedBinInLevel += 1
+            val binsBeforeBreak = bins.splitAt(minDiffIdx())._1
+            val binsAfterBreak = bins.splitAt(minDiffIdx() + noConsecutiveBins)._2
+            bins = binsBeforeBreak ++ Array(minDiffBin()) ++ binsAfterBreak
+          } else {
+            anyBinMerged = false
+          }
         }
       } while (anyBinMerged)
 
       Logger("Level %d, Merged bins: %d, BIC: %.6f, Bin size: %d".format(noConsecutiveBins, noMergedBinInLevel, originalBIC, bins.size))
 
-      if (noMergedBinInLevel > 0) {
+      if (noMergedBinInLevel > 0)
         noConsecutiveBins += 1
-      } else {
+      else
         noConsecutiveBins -= 1
-      }
     } while (noConsecutiveBins > 1)
 
     // write segmentaion results in SEG (CBS) format
     val segFileWriter = new FileWriter(segFile)
-    segFileWriter.write("'ID\tChromosome\tStart\tEnd\tRead_Count\tLog2Ratio\n")
-
-    bins.foreach { b => segFileWriter.write("%s\t%s\t%d\t%d\t%d/%d\t%.6f\n".format(id, b.refName, b.posStart, b.posEnd, b.readCountTest, b.readCountControl, b.log2Ratio)) }
+    segFileWriter.write("'ID\tChromosome\tStart\tEnd\tRead_Count_Tumor\tRead_Count_Normal\tLog2Ratio\n")
+    bins.foreach { b => segFileWriter.write("%s\t%s\t%d\t%d\t%d\t%d\t%.6f\n".format(id, b.refName, b.posStart, b.posEnd, b.readCountTest, b.readCountControl, b.log2Ratio)) }
     segFileWriter.close
   }
 
@@ -411,16 +409,17 @@ object BICseqXO {
 
     if (parser.parse(args)) {
       setParallelism(config.ncpu)
+
       val refNames = parseRefNames(config.refNames)
       val segDir = config.outDir
       FileUtils.forceMkdir(new File(segDir))
 
       for (refName <- refNames.par) {
-        val binFile = FilenameUtils.concat(config.binDir, refName + ".rc_norm.bin")
-          val segFile = FilenameUtils.concat(segDir, refName + ".seg")
-          createSegFile(binFile, segFile, config.lambda, config.id)
+        //val binFile = FilenameUtils.concat(config.binDir, refName + ".rc_norm.bin")
+        val binFile = FilenameUtils.concat(config.binDir, refName + ".bin")
+        val segFile = FilenameUtils.concat(segDir, refName + ".seg")
+        createSegFile(binFile, segFile, config.lambda, config.id)
       }
-      System.exit(1)
     } else {
       // When arguments are bad, usage message will have been displayed
     }
@@ -429,8 +428,9 @@ object BICseqXO {
   def main(args: Array[String]) = {
     if (args.size == 0) {
       printMainUsage()
-      System.exit(0)
+      System.exit(1)
     } else {
+      val timeStart = System.nanoTime: Double
       val command = Command(args.head)
       command match {
         case Command("map") => createMapFiles(args.tail)
@@ -439,9 +439,13 @@ object BICseqXO {
         case _ => {
             System.err.println("Error: '%s' is not a BICseqXO command.\n".format(args.head))
             printMainUsage()
-            System.exit(0)
-          }
+            System.exit(1)
         }
+      }
+      val timeEnd = System.nanoTime: Double
+      val timeElapsed = (timeEnd - timeStart) / 1e9
+      Logger("Elapsed time: %.6f s".format(timeElapsed))
+      System.exit(0)
     }
   }
 }
