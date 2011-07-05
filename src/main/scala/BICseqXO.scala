@@ -313,15 +313,15 @@ object BICseqXO {
     
   def createSegFile(binFile: String, segFile: String, lambda: Int, id: String): Unit = {
 
-    def calculateBIC(bins: Array[Bin], lambda: Int, totalReadCount: Int): Double = {
+    def calculateBIC(bins: ArrayBuffer[Bin], lambda: Int, totalReadCount: Int): Double = {
       (bins.size + 1) * lambda * log(totalReadCount) - 2 * bins.map(_.logL).sum
     }
 
-    def diffBIC(bins1: Array[Bin], bins2: Array[Bin], lambda: Int, totalReadCount: Int): Double = {
+    def calculateBICDiff(bins1: ArrayBuffer[Bin], bins2: ArrayBuffer[Bin], lambda: Int, totalReadCount: Int): Double = {
       calculateBIC(bins1, lambda, totalReadCount) - calculateBIC(bins2, lambda, totalReadCount)
     }
 
-    var tmpBins = new ArrayBuffer[Bin]()
+    var bins = new ArrayBuffer[Bin]()
     val refName = FilenameUtils.getBaseName(binFile).split('.').head
     val BinRegex = """^(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(\d+).*$""".r
 
@@ -329,55 +329,91 @@ object BICseqXO {
       line match {
         case BinRegex(readCountTest, readCountBoth, readCountRatioTest, posStart, posEnd) =>
           val readCountControl = readCountBoth.toInt - readCountTest.toInt
-          tmpBins += Bin(refName, posStart.toInt, posEnd.toInt, readCountTest.toInt, readCountControl)
+          bins += Bin(refName, posStart.toInt, posEnd.toInt, readCountTest.toInt, readCountControl)
         case _ => // do nothing
       }
     }
 
-    Logger("%d bins detected from %s".format(tmpBins.size, binFile))
+    Logger("%d bins detected from %s".format(bins.size, binFile))
 
     // BIC-seq
-    var bins = tmpBins.toArray
     val totalReadCount = bins.map(_.readCountBoth).sum
     var originalBIC = calculateBIC(bins, lambda, totalReadCount)
     var noConsecutiveBins = 2
+    //var binPosRangeToBin = TMap[(Int, Int), Bin]().single
+    //var binPosRangeToDiffBIC = TMap[(Int, Int), Double]().single
+    var binPosRangeToBin = HashMap[(Int, Int), Bin]()
+    var binPosRangeToDiffBIC = HashMap[(Int, Int), Double]()
 
     do {
       var anyBinMerged = false
       var noMergedBinInLevel = 0
       do {
-        var minDiffBIC = Ref(0.0)
-        var minDiffIdx = Ref(0)
-        var minDiffBin = Ref(bins.head) // could be any Bin object
+        //var minDiffBIC = Ref(0.0)
+        //var minDiffIdx = Ref(0)
+        //var minDiffBin = Ref(bins.head) // could be any Bin object
+        var minDiffBIC = 0.0
+        var minDiffIdx = 0
+        var minDiffBin = bins.head // could be any Bin object
         val untilIdx = bins.size - noConsecutiveBins
+        var fromIdx = 0
 
-        (0 to untilIdx).par.foreach { fromIdx =>
-          val binRange = fromIdx to (fromIdx + noConsecutiveBins - 1)
-          val mergedBin = binRange.map(bins(_)).reduceLeft(_ + _)
-          val binRangeLogL = bins.slice(binRange.head, binRange.last + 1).map(_.logL).sum
-          val bicDiff = 2 * (binRangeLogL - mergedBin.logL) - (noConsecutiveBins - 1) * lambda * log(totalReadCount)
-
-          atomic { implicit txn =>
-            if (bicDiff < minDiffBIC()) {
-              minDiffBIC() = bicDiff
-              minDiffIdx() = fromIdx
-              minDiffBin() = mergedBin
+        //(0 to untilIdx).par.foreach { fromIdx =>
+        while(fromIdx <= untilIdx) {
+          val binPosRange = (bins(fromIdx).posStart, bins(fromIdx + noConsecutiveBins - 1).posEnd)
+          val (binMerged, diffBIC) = 
+            if (binPosRangeToDiffBIC.contains(binPosRange)) {
+              (binPosRangeToBin(binPosRange), binPosRangeToDiffBIC(binPosRange))
+            } else {
+              val binsToMerge = bins.slice(fromIdx, fromIdx + noConsecutiveBins)
+              val binsToMergeLogL = binsToMerge.map(_.logL).sum
+              val mergedBin = binsToMerge.reduceLeft(_ + _)
+              val bicDiff = 2 * (binsToMergeLogL - mergedBin.logL) - (noConsecutiveBins - 1) * lambda * log(totalReadCount)
+              //atomic { implicit txn =>
+                //binPosRangeToBin += binPosRange -> mergedBin
+                //binPosRangeToDiffBIC += binPosRange -> bicDiff
+              //}
+              binPosRangeToBin += binPosRange -> mergedBin
+              binPosRangeToDiffBIC += binPosRange -> bicDiff
+              (mergedBin, bicDiff)
             }
+
+          //atomic { implicit txn =>
+            //if (diffBIC < minDiffBIC()) {
+              //minDiffBIC() = diffBIC
+              //minDiffIdx() = fromIdx
+              //minDiffBin() = binMerged
+            //}
+          //}
+          if (diffBIC < minDiffBIC) {
+            minDiffBIC = diffBIC
+            minDiffIdx = fromIdx
+            minDiffBin = binMerged
           }
         }
 
-        atomic { implicit txn =>
-          if (minDiffBIC() < 0) {
-            originalBIC += minDiffBIC()
-            anyBinMerged = true
-            noMergedBinInLevel += 1
-            val binsBeforeBreak = bins.splitAt(minDiffIdx())._1
-            val binsAfterBreak = bins.splitAt(minDiffIdx() + noConsecutiveBins)._2
-            bins = binsBeforeBreak ++ Array(minDiffBin()) ++ binsAfterBreak
-          } else {
-            anyBinMerged = false
-          }
+        if (minDiffBIC < 0) {
+          originalBIC += minDiffBIC
+          anyBinMerged = true
+          noMergedBinInLevel += 1
+          bins(minDiffIdx) = minDiffBin
+          bins.remove(minDiffIdx + 1, noConsecutiveBins - 1)
+          //logger("level %d, bic: %.6f, bin size: %d - %d-%d bins merged".format(noconsecutivebins, originalbic, bins.size, mindiffidx(), mindiffidx() + noconsecutivebins))
+        } else {
+          anyBinMerged = false
         }
+        //atomic { implicit txn =>
+          //if (mindiffbic() < 0) {
+            //originalbic += mindiffbic()
+            //anybinmerged = true
+            //nomergedbininlevel += 1
+            //bins(mindiffidx()) = mindiffbin()
+            //bins.remove(mindiffidx() + 1, noconsecutivebins - 1)
+            ////logger("level %d, bic: %.6f, bin size: %d - %d-%d bins merged".format(noconsecutivebins, originalbic, bins.size, mindiffidx(), mindiffidx() + noconsecutivebins))
+          //} else {
+            //anybinmerged = false
+          //}
+        //}
       } while (anyBinMerged)
 
       Logger("Level %d, Merged bins: %d, BIC: %.6f, Bin size: %d".format(noConsecutiveBins, noMergedBinInLevel, originalBIC, bins.size))
